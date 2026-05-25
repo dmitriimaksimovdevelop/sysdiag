@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,40 +15,61 @@ import (
 
 var (
 	shareBaseURL string
+	shareAPIURL  string
+	shareOffline bool
+	shareTimeout time.Duration
 )
 
 var shareCmd = &cobra.Command{
 	Use:   "share <report.json>",
 	Short: "Encode a report summary into a shareable URL",
 	Long: `Reads a melisai JSON report and prints a URL that embeds the
-diagnostic summary (health score, anomalies, USE metrics, recommendations)
-inside the URL fragment. No data is uploaded anywhere — the receiving
-page at melisai.dev/r decodes and renders the payload entirely
-client-side.
+diagnostic summary (health score, anomalies, USE metrics, recommendations).
+
+By default the payload is uploaded to the melisai.dev short-link backend
+and a URL like https://melisai.dev/r/Xa9bC3kp is printed. If the backend
+is unreachable (no network, airgapped server, 5xx, timeout) the command
+falls back to a self-contained fragment URL of the form
+https://melisai.dev/r#<base64url-gzip> — these are longer but require
+no server.
 
 Use "-" to read the report from stdin.
 
-Privacy note: the payload includes hostname, kernel version, and the
-recommendation evidence text. Treat the resulting URL with the same
-care as the report file itself.
+Privacy note: every variant of the URL includes hostname, kernel version,
+and recommendation evidence text. Treat the URL with the same care as
+the report file itself.
 
-Example:
+Examples:
   melisai collect --profile quick -o report.json
-  melisai share report.json
-  # → https://melisai.dev/r#H4sIAAAAAAAA...`,
+  melisai share report.json                       # short link, with fallback
+  melisai share --offline report.json             # force fragment URL
+  melisai share --api-url=http://lab/api/r -      # custom backend, stdin`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		report, err := loadReportForShare(args[0])
 		if err != nil {
 			return err
 		}
-
 		payload := share.BuildPayload(report)
+
+		if !shareOffline {
+			url, uploadErr := share.Upload(cmd.Context(), payload, shareAPIURL, shareTimeout)
+			if uploadErr == nil {
+				fmt.Println(url)
+				return nil
+			}
+			// Fall through to fragment with a warning. The CLI must
+			// still succeed so users on airgapped boxes can ship the
+			// long URL via whatever transport they have.
+			fmt.Fprintf(os.Stderr,
+				"warning: short-link upload failed (%v); falling back to self-contained URL\n",
+				uploadErr)
+		}
+
 		url, err := share.BuildURL(payload, shareBaseURL)
 		if err != nil {
 			return fmt.Errorf("build url: %w", err)
 		}
-
 		fmt.Println(url)
 		return nil
 	},
@@ -55,7 +77,13 @@ Example:
 
 func init() {
 	shareCmd.Flags().StringVar(&shareBaseURL, "base-url", share.DefaultBaseURL,
-		"Receiver base URL (must be http or https with a host)")
+		"Viewer base URL used for fragment fallback (must be http or https with a host)")
+	shareCmd.Flags().StringVar(&shareAPIURL, "api-url", share.DefaultAPIURL,
+		"Backend endpoint for short-link upload")
+	shareCmd.Flags().BoolVar(&shareOffline, "offline", false,
+		"Skip the backend upload and emit a self-contained fragment URL")
+	shareCmd.Flags().DurationVar(&shareTimeout, "timeout", share.DefaultUploadTimeout,
+		"Timeout for the upload attempt before falling back to fragment URL")
 }
 
 // loadReportForShare reads a Report from a file path or stdin (when path is "-").
