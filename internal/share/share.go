@@ -66,28 +66,38 @@ func BuildPayload(r *model.Report) *Payload {
 	}
 }
 
-// Encode serializes the payload to JSON, gzips it, and base64url-encodes
-// the result. The output is safe to drop into a URL fragment without
-// further escaping.
-func Encode(p *Payload) (string, error) {
+// encodeGzip returns the gzip-compressed JSON of the payload — used
+// both as the raw upload body for short-link mode and as input to the
+// base64url step in Encode.
+func encodeGzip(p *Payload) ([]byte, error) {
 	raw, err := json.Marshal(p)
 	if err != nil {
-		return "", fmt.Errorf("marshal payload: %w", err)
+		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
 
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
-		return "", fmt.Errorf("init gzip: %w", err)
+		return nil, fmt.Errorf("init gzip: %w", err)
 	}
 	if _, err := gz.Write(raw); err != nil {
-		return "", fmt.Errorf("gzip write: %w", err)
+		return nil, fmt.Errorf("gzip write: %w", err)
 	}
 	if err := gz.Close(); err != nil {
-		return "", fmt.Errorf("gzip close: %w", err)
+		return nil, fmt.Errorf("gzip close: %w", err)
 	}
+	return buf.Bytes(), nil
+}
 
-	return base64.RawURLEncoding.EncodeToString(buf.Bytes()), nil
+// Encode serializes the payload to JSON, gzips it, and base64url-encodes
+// the result. The output is safe to drop into a URL fragment without
+// further escaping.
+func Encode(p *Payload) (string, error) {
+	gz, err := encodeGzip(p)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(gz), nil
 }
 
 // Decode reverses Encode — primarily used by tests and any future
