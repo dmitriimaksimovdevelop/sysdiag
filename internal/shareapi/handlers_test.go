@@ -27,7 +27,10 @@ func gzipBytes(t *testing.T, data string) []byte {
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	store := openTestStore(t)
-	srv := NewServer(store, "https://example.test/r", 0, nil)
+	srv, err := NewServer(store, "https://example.test/r", 0, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts
@@ -108,7 +111,10 @@ func TestCreateRejectsEmpty(t *testing.T) {
 
 func TestCreateRejectsTooLarge(t *testing.T) {
 	store := openTestStore(t)
-	srv := NewServer(store, "https://example.test/r", 100, nil)
+	srv, err := NewServer(store, "https://example.test/r", 100, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -179,17 +185,24 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestPublicBaseFromString(t *testing.T) {
+func TestValidatePublicBase(t *testing.T) {
 	good := []string{"https://melisai.dev/r", "http://localhost:8080/r"}
 	for _, s := range good {
-		if err := publicBaseFromString(s); err != nil {
-			t.Errorf("publicBaseFromString(%q) err = %v, want nil", s, err)
+		if err := ValidatePublicBase(s); err != nil {
+			t.Errorf("ValidatePublicBase(%q) err = %v, want nil", s, err)
 		}
 	}
 	bad := []string{"", "javascript:alert(1)", "ftp://example.com/", "not a url", "https://"}
 	for _, s := range bad {
-		if err := publicBaseFromString(s); err == nil {
-			t.Errorf("publicBaseFromString(%q) err = nil, want error", s)
+		if err := ValidatePublicBase(s); err == nil {
+			t.Errorf("ValidatePublicBase(%q) err = nil, want error", s)
 		}
+	}
+}
+
+func TestNewServerRejectsBadPublicBase(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewServer(store, "javascript:alert(1)", 0, nil); err == nil {
+		t.Error("NewServer accepted javascript: scheme")
 	}
 }

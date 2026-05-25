@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -81,6 +82,37 @@ func TestCount(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("Count = %d, want 3", n)
+	}
+}
+
+func TestDeleteOlderThan(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// Insert three rows, then sleep just long enough that the second
+	// created_at falls strictly before the cutoff we choose below.
+	if err := s.Put(ctx, "old00000", []byte("old")); err != nil {
+		t.Fatalf("put old: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	cutoff := time.Now()
+	time.Sleep(50 * time.Millisecond)
+	if err := s.Put(ctx, "new00000", []byte("new")); err != nil {
+		t.Fatalf("put new: %v", err)
+	}
+
+	deleted, err := s.DeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1", deleted)
+	}
+	if _, err := s.Get(ctx, "old00000"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("old row still present: err = %v", err)
+	}
+	if _, err := s.Get(ctx, "new00000"); err != nil {
+		t.Errorf("new row removed: err = %v", err)
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,7 +53,7 @@ Examples:
 		payload := share.BuildPayload(report)
 
 		if !shareOffline {
-			url, uploadErr := share.Upload(context.Background(), payload, shareAPIURL, shareTimeout)
+			url, uploadErr := share.Upload(cmd.Context(), payload, shareAPIURL, shareTimeout)
 			if uploadErr == nil {
 				fmt.Println(url)
 				return nil

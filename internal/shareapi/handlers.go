@@ -25,16 +25,20 @@ const retryOnCollision = 3
 
 // Server is the HTTP layer.
 type Server struct {
-	store       *Store
-	publicBase  string // e.g. "https://melisai.dev/r" — used to build the URL returned by POST
+	store        *Store
+	publicBase   string // e.g. "https://melisai.dev/r" — used to build the URL returned by POST
 	maxBodyBytes int64
-	log         *slog.Logger
+	log          *slog.Logger
 }
 
-// NewServer wires the dependencies. publicBase must be the canonical
-// viewer URL prefix (without trailing slash); the POST response embeds
-// it so the CLI can print a ready-to-share link.
-func NewServer(store *Store, publicBase string, maxBodyBytes int64, log *slog.Logger) *Server {
+// NewServer wires the dependencies. publicBase must be a valid http(s)
+// URL with a host — main.go validates with ValidatePublicBase before
+// reaching here, but we re-check defensively so library callers can't
+// embed bogus URLs.
+func NewServer(store *Store, publicBase string, maxBodyBytes int64, log *slog.Logger) (*Server, error) {
+	if err := ValidatePublicBase(publicBase); err != nil {
+		return nil, err
+	}
 	if maxBodyBytes <= 0 {
 		maxBodyBytes = DefaultMaxBodyBytes
 	}
@@ -46,7 +50,7 @@ func NewServer(store *Store, publicBase string, maxBodyBytes int64, log *slog.Lo
 		publicBase:   strings.TrimRight(publicBase, "/"),
 		maxBodyBytes: maxBodyBytes,
 		log:          log,
-	}
+	}, nil
 }
 
 // Handler returns the HTTP handler covering /healthz and /api/r.
@@ -160,6 +164,9 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putWithRetry(ctx context.Context, payload []byte) (string, error) {
 	for attempt := 0; attempt < retryOnCollision; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		code, err := GenerateCode()
 		if err != nil {
 			return "", fmt.Errorf("generate code: %w", err)
@@ -177,10 +184,10 @@ func (s *Server) putWithRetry(ctx context.Context, payload []byte) (string, erro
 	return "", errors.New("exhausted collision retries")
 }
 
-// publicBaseFromString validates that the public base URL passed to
-// NewServer is something we can safely embed in the JSON response —
-// must be http(s) with a host.
-func publicBaseFromString(raw string) error {
+// ValidatePublicBase rejects public base URLs that NewServer cannot
+// safely embed in POST responses — anything that is not http(s) with
+// a host (e.g. javascript:, data:, malformed).
+func ValidatePublicBase(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("parse public base: %w", err)

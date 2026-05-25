@@ -45,6 +45,9 @@ func Upload(ctx context.Context, p *Payload, apiURL string, timeout time.Duratio
 		return "", fmt.Errorf("compress payload: %w", err)
 	}
 
+	// Single source of truth for the budget: context.WithTimeout. We do
+	// NOT also set http.Client.Timeout — that would race with ctx and
+	// cancel body reads independently, producing harder-to-read errors.
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -55,8 +58,7 @@ func Upload(ctx context.Context, p *Payload, apiURL string, timeout time.Duratio
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("User-Agent", "melisai-share/1")
 
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("post: %w", err)
 	}

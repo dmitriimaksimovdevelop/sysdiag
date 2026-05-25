@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,7 +33,11 @@ func Open(path string) (*Store, error) {
 	// _txlock=immediate makes writes acquire the write lock at BEGIN
 	// rather than first write — avoids "database is locked" surprises
 	// under contention with the single-writer share-api workload.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	//
+	// The path goes through file: URI form to survive characters that
+	// would otherwise be parsed as DSN delimiters (?, #, &).
+	dsn := "file:" + url.PathEscape(path) +
+		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -99,6 +104,23 @@ func (s *Store) Count(ctx context.Context) (int64, error) {
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM reports`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count: %w", err)
 	}
+	return n, nil
+}
+
+// DeleteOlderThan removes rows whose created_at is older than cutoff.
+// Returns the number of rows deleted. The receiver runs this on a
+// timer to keep the PVC from filling and bricking the deployment.
+//
+// A separate VACUUM is intentionally NOT issued — SQLite reuses freed
+// pages within the existing file, which is exactly what we want under
+// a fixed-size PVC.
+func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM reports WHERE created_at < ?`, cutoff.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("delete old reports: %w", err)
+	}
+	n, _ := res.RowsAffected()
 	return n, nil
 }
 
