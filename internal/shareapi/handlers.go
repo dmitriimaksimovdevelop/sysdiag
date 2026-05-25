@@ -157,8 +157,12 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	// NOT set Content-Encoding: gzip, because that would make the browser
 	// auto-decompress and prevent the viewer page from streaming the
 	// bytes through DecompressionStream itself.
+	//
+	// Cache-Control: short max-age for CDN-style proxies, but no
+	// "immutable" — payloads may be deleted by retention sweep and we
+	// don't want stale copies to outlive the underlying row.
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Cache-Control", "public, max-age=300, immutable")
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(payload)
 }
 
