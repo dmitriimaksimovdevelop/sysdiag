@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,13 +29,15 @@ import (
 
 func main() {
 	var (
-		addr            = flag.String("addr", ":8080", "HTTP listen address")
-		dbPath          = flag.String("db", "/var/lib/melisai-share-api/store.db", "SQLite database path")
-		publicBase      = flag.String("public-base", "https://melisai.dev/r", "Viewer base URL embedded in POST responses")
-		maxBodyBytes    = flag.Int64("max-body-bytes", shareapi.DefaultMaxBodyBytes, "Max upload size in bytes")
-		logLevel        = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		retention       = flag.Duration("retention", 0, "Delete reports older than this; 0 disables retention (e.g. 2160h for 90 days)")
-		cleanupInterval = flag.Duration("cleanup-interval", time.Hour, "How often the retention sweep runs (ignored when --retention=0)")
+		addr             = flag.String("addr", ":8080", "HTTP listen address")
+		dbPath           = flag.String("db", "/var/lib/melisai-share-api/store.db", "SQLite database path")
+		publicBase       = flag.String("public-base", "https://melisai.dev/r", "Viewer base URL embedded in POST responses")
+		maxBodyBytes     = flag.Int64("max-body-bytes", shareapi.DefaultMaxBodyBytes, "Max compressed upload size in bytes")
+		maxInflatedBytes = flag.Int64("max-inflated-bytes", shareapi.DefaultMaxInflatedBytes, "Max decompressed payload size in bytes (defends against gzip bombs)")
+		logLevel         = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+		retention        = flag.Duration("retention", 0, "Delete reports older than this; 0 disables retention (e.g. 2160h for 90 days)")
+		cleanupInterval  = flag.Duration("cleanup-interval", time.Hour, "How often the retention sweep runs (ignored when --retention=0)")
+		deleteOnStartup  = flag.String("delete-on-startup", "", "Comma-separated codes to delete from the store at startup, then continue normally")
 	)
 	flag.Parse()
 
@@ -45,13 +48,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(*addr, *dbPath, *publicBase, *maxBodyBytes, *retention, *cleanupInterval, logger); err != nil {
+	if err := run(*addr, *dbPath, *publicBase, *maxBodyBytes, *maxInflatedBytes, *retention, *cleanupInterval, *deleteOnStartup, logger); err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, dbPath, publicBase string, maxBodyBytes int64, retention, cleanupInterval time.Duration, log *slog.Logger) error {
+func run(addr, dbPath, publicBase string, maxBodyBytes, maxInflatedBytes int64, retention, cleanupInterval time.Duration, deleteOnStartup string, log *slog.Logger) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return fmt.Errorf("create db dir: %w", err)
 	}
@@ -66,10 +69,17 @@ func run(addr, dbPath, publicBase string, maxBodyBytes int64, retention, cleanup
 		}
 	}()
 
+	if deleteOnStartup != "" {
+		if err := startupDelete(context.Background(), store, deleteOnStartup, log); err != nil {
+			return fmt.Errorf("delete-on-startup: %w", err)
+		}
+	}
+
 	srv, err := shareapi.NewServer(store, publicBase, maxBodyBytes, log)
 	if err != nil {
 		return fmt.Errorf("init server: %w", err)
 	}
+	srv = srv.WithMaxInflatedBytes(maxInflatedBytes)
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -120,6 +130,26 @@ func run(addr, dbPath, publicBase string, maxBodyBytes int64, retention, cleanup
 	}
 
 	log.Info("server stopped")
+	return nil
+}
+
+// startupDelete removes the given comma-separated codes from the store
+// once before the HTTP server starts accepting traffic. Used to take
+// down malicious or accidentally-shared payloads without invoking
+// kubectl exec — set --delete-on-startup=Xxxx,Yyyy on the next deploy,
+// observe the log line, then remove the flag.
+func startupDelete(ctx context.Context, store *shareapi.Store, codes string, log *slog.Logger) error {
+	for _, code := range strings.Split(codes, ",") {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		n, err := store.DeleteByCode(ctx, code)
+		if err != nil {
+			return fmt.Errorf("delete %q: %w", code, err)
+		}
+		log.Info("delete-on-startup", "code", code, "rows", n)
+	}
 	return nil
 }
 

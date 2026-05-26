@@ -24,6 +24,12 @@ func gzipBytes(t *testing.T, data string) []byte {
 	return buf.Bytes()
 }
 
+// validPayloadGzip returns the minimum payload accepted by handleCreate
+// after the C3 validation: schema v=1, parses into share.Payload.
+func validPayloadGzip(t *testing.T) []byte {
+	return gzipBytes(t, `{"v":1,"meta":{"hostname":"h","kernel":"k","cpus":1,"memory_gb":1,"profile":"quick","duration":"10s","timestamp":"t","tool_version":"v"},"summary":{"health_score":100,"anomalies":[],"resources":{},"recommendations":[]}}`)
+}
+
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	store := openTestStore(t)
@@ -38,7 +44,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 
 func TestCreateAndFetchRoundTrip(t *testing.T) {
 	_, ts := newTestServer(t)
-	payload := gzipBytes(t, `{"v":1,"hello":"world"}`)
+	payload := validPayloadGzip(t)
 
 	// POST
 	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(payload))
@@ -94,6 +100,82 @@ func TestCreateRejectsNonGzip(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestCreateRejectsGzipMagicWithGarbage covers the C3 finding from the
+// security audit: previously the handler only verified the two gzip
+// magic bytes, so a payload starting with 1f 8b followed by random
+// data was happily stored and later crashed every viewer.
+func TestCreateRejectsGzipMagicWithGarbage(t *testing.T) {
+	_, ts := newTestServer(t)
+	payload := append([]byte{0x1f, 0x8b}, []byte("not a real gzip stream")...)
+	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateRejectsGzipBomb(t *testing.T) {
+	store := openTestStore(t)
+	srv, err := NewServer(store, "https://example.test/r", 0, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv = srv.WithMaxInflatedBytes(1024) // 1 KiB cap for this test
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Compress 16 KiB of zeros — gzip squeezes this to <100 bytes but
+	// inflates back to 16 KiB, well over our test cap.
+	bomb := gzipBytes(t, strings.Repeat("\x00", 16*1024))
+	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(bomb))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("bomb status = %d, want 400, body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestCreateRejectsWrongSchemaVersion(t *testing.T) {
+	_, ts := newTestServer(t)
+	body := gzipBytes(t, `{"v":99,"meta":{},"summary":{}}`)
+	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (unsupported version)", resp.StatusCode)
+	}
+}
+
+func TestCreateRejectsNotJSON(t *testing.T) {
+	_, ts := newTestServer(t)
+	body := gzipBytes(t, "this is not json at all, just some text")
+	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateAcceptsValidPayload(t *testing.T) {
+	_, ts := newTestServer(t)
+	body := gzipBytes(t, `{"v":1,"meta":{"hostname":"h","kernel":"k","cpus":1,"memory_gb":1,"profile":"quick","duration":"10s","timestamp":"now","tool_version":"0.0.0"},"summary":{"health_score":100,"anomalies":[],"resources":{},"recommendations":[]}}`)
+	resp, err := http.Post(ts.URL+"/api/r", "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 201, body=%s", resp.StatusCode, b)
 	}
 }
 
