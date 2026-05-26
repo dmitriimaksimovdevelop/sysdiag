@@ -22,9 +22,24 @@ var ErrCodeExists = errors.New("share code already exists")
 // Store wraps a SQLite database holding gzip-compressed share payloads
 // keyed by short code. The schema is intentionally minimal — bumping
 // the layout is a manual migration.
+//
+// Two separate connection pools open the same file:
+//   - writer: MaxOpenConns(1), used for Put/DeleteOlderThan. SQLite
+//     allows only one writer at a time anyway.
+//   - reader: MaxOpenConns(N), opened in read-only mode (?mode=ro).
+//     Concurrent SELECTs do not contend with a long-running writer,
+//     which prevents an attacker holding the single write slot from
+//     stalling viewers loading other reports.
 type Store struct {
-	db *sql.DB
+	writer *sql.DB
+	reader *sql.DB
 }
+
+// readerPoolSize is the cap on concurrent read connections. SQLite WAL
+// mode lets readers proceed during a writer transaction; sizing this
+// to a few times the expected GET concurrency keeps tail latency low
+// without exhausting file descriptors.
+const readerPoolSize = 8
 
 // Open initialises (or upgrades) the SQLite database at path. The file
 // is created on first use. WAL mode is enabled so reads do not block
@@ -36,38 +51,56 @@ func Open(path string) (*Store, error) {
 	//
 	// The path goes through file: URI form to survive characters that
 	// would otherwise be parsed as DSN delimiters (?, #, &).
-	dsn := "file:" + url.PathEscape(path) +
+	escaped := url.PathEscape(path)
+	writerDSN := "file:" + escaped +
 		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	db.SetMaxOpenConns(1) // SQLite is single-writer; serialise at the pool.
+	readerDSN := "file:" + escaped +
+		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&mode=ro"
 
-	if _, err := db.Exec(`
+	writer, err := sql.Open("sqlite", writerDSN)
+	if err != nil {
+		return nil, fmt.Errorf("open writer %s: %w", path, err)
+	}
+	writer.SetMaxOpenConns(1) // SQLite is single-writer; serialise at the pool.
+
+	if _, err := writer.Exec(`
 		CREATE TABLE IF NOT EXISTS reports (
 			code       TEXT    PRIMARY KEY,
 			payload    BLOB    NOT NULL,
 			created_at INTEGER NOT NULL
 		) STRICT
 	`); err != nil {
-		db.Close()
+		writer.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	// Index on created_at so the retention sweep doesn't table-scan.
+	if _, err := writer.Exec(`CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at)`); err != nil {
+		writer.Close()
+		return nil, fmt.Errorf("create index: %w", err)
+	}
 
-	return &Store{db: db}, nil
+	reader, err := sql.Open("sqlite", readerDSN)
+	if err != nil {
+		writer.Close()
+		return nil, fmt.Errorf("open reader %s: %w", path, err)
+	}
+	reader.SetMaxOpenConns(readerPoolSize)
+	reader.SetMaxIdleConns(readerPoolSize)
+
+	return &Store{writer: writer, reader: reader}, nil
 }
 
-// Close releases the database file.
+// Close releases the database file. Both pool errors are joined so
+// neither one is silently dropped during a restart loop.
 func (s *Store) Close() error {
-	return s.db.Close()
+	return errors.Join(s.reader.Close(), s.writer.Close())
 }
 
 // Put inserts a payload under the given code. Returns ErrCodeExists if
 // the code collides with an existing row — callers should generate a
 // new code and retry.
 func (s *Store) Put(ctx context.Context, code string, payload []byte) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.writer.ExecContext(ctx,
 		`INSERT INTO reports (code, payload, created_at) VALUES (?, ?, ?)`,
 		code, payload, time.Now().Unix())
 	if err == nil {
@@ -83,9 +116,11 @@ func (s *Store) Put(ctx context.Context, code string, payload []byte) error {
 }
 
 // Get returns the stored payload for the given code, or ErrNotFound.
+// Uses the read-only connection pool so a long-running writer cannot
+// stall GET handlers.
 func (s *Store) Get(ctx context.Context, code string) ([]byte, error) {
 	var payload []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.reader.QueryRowContext(ctx,
 		`SELECT payload FROM reports WHERE code = ?`, code).
 		Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -101,7 +136,7 @@ func (s *Store) Get(ctx context.Context, code string) ([]byte, error) {
 // surface basic operability without exposing internals.
 func (s *Store) Count(ctx context.Context) (int64, error) {
 	var n int64
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM reports`).Scan(&n); err != nil {
+	if err := s.reader.QueryRowContext(ctx, `SELECT count(*) FROM reports`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count: %w", err)
 	}
 	return n, nil
@@ -115,10 +150,23 @@ func (s *Store) Count(ctx context.Context) (int64, error) {
 // pages within the existing file, which is exactly what we want under
 // a fixed-size PVC.
 func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.writer.ExecContext(ctx,
 		`DELETE FROM reports WHERE created_at < ?`, cutoff.Unix())
 	if err != nil {
 		return 0, fmt.Errorf("delete old reports: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteByCode removes a specific report. Returns the number of rows
+// deleted (0 if the code was already absent). Used by operators to
+// take down a malicious or accidentally-shared payload.
+func (s *Store) DeleteByCode(ctx context.Context, code string) (int64, error) {
+	res, err := s.writer.ExecContext(ctx,
+		`DELETE FROM reports WHERE code = ?`, code)
+	if err != nil {
+		return 0, fmt.Errorf("delete report %s: %w", code, err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
