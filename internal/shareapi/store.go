@@ -90,14 +90,10 @@ func Open(path string) (*Store, error) {
 	return &Store{writer: writer, reader: reader}, nil
 }
 
-// Close releases the database file.
+// Close releases the database file. Both pool errors are joined so
+// neither one is silently dropped during a restart loop.
 func (s *Store) Close() error {
-	rErr := s.reader.Close()
-	wErr := s.writer.Close()
-	if wErr != nil {
-		return wErr
-	}
-	return rErr
+	return errors.Join(s.reader.Close(), s.writer.Close())
 }
 
 // Put inserts a payload under the given code. Returns ErrCodeExists if

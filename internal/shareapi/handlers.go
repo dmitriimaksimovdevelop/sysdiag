@@ -172,6 +172,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // validatePayload inflates payload under a size cap and confirms it
 // parses as a current-schema share.Payload. It returns a user-facing
 // error message on rejection.
+//
+// We stream-decode JSON directly off the gzip reader (wrapped in a
+// LimitReader) rather than holding the whole inflated buffer in
+// memory. This keeps peak transient allocation bounded by json's
+// internal buffer plus the unmarshaled struct, instead of 2× the cap
+// that io.ReadAll would temporarily reserve.
 func (s *Server) validatePayload(payload []byte) error {
 	gz, err := gzip.NewReader(bytes.NewReader(payload))
 	if err != nil {
@@ -179,22 +185,25 @@ func (s *Server) validatePayload(payload []byte) error {
 	}
 	defer gz.Close()
 
-	// +1 lets us detect overflow with a single trailing read.
-	limited := io.LimitReader(gz, s.maxInflatedBytes+1)
-	inflated, err := io.ReadAll(limited)
-	if err != nil {
-		return fmt.Errorf("decompress payload: %w", err)
-	}
-	if int64(len(inflated)) > s.maxInflatedBytes {
-		return fmt.Errorf("decompressed payload exceeds %d bytes (likely a gzip bomb)", s.maxInflatedBytes)
-	}
-
 	// We accept unknown JSON fields on purpose: future v=1-compatible
 	// clients may add optional fields (e.g. an extra meta.* tag); the
 	// viewer already ignores them, so the server should too.
+	limited := io.LimitReader(gz, s.maxInflatedBytes+1)
 	var parsed share.Payload
-	if err := json.Unmarshal(inflated, &parsed); err != nil {
+	if err := json.NewDecoder(limited).Decode(&parsed); err != nil {
 		return fmt.Errorf("payload is not valid melisai share JSON: %w", err)
+	}
+	// After Decode succeeds, drain the rest under the same cap. If any
+	// bytes remain past maxInflatedBytes we know the payload was a
+	// bomb that happened to be valid JSON in its prefix — reject it.
+	overflow, err := io.Copy(io.Discard, limited)
+	if err != nil {
+		return fmt.Errorf("read trailing payload: %w", err)
+	}
+	if overflow > 0 {
+		// Decode advanced exactly maxInflatedBytes — anything left in
+		// the gzip stream past the cap is over-budget.
+		return fmt.Errorf("decompressed payload exceeds %d bytes (likely a gzip bomb)", s.maxInflatedBytes)
 	}
 	if parsed.V != share.PayloadVersion {
 		return fmt.Errorf("unsupported payload version %d (server expects %d)", parsed.V, share.PayloadVersion)

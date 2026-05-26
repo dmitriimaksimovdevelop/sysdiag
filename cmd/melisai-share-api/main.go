@@ -138,11 +138,18 @@ func run(addr, dbPath, publicBase string, maxBodyBytes, maxInflatedBytes int64, 
 // down malicious or accidentally-shared payloads without invoking
 // kubectl exec — set --delete-on-startup=Xxxx,Yyyy on the next deploy,
 // observe the log line, then remove the flag.
+//
+// Codes are validated against the same shape as GenerateCode produces,
+// so an operator typo cannot end up logging arbitrary control bytes
+// or silently no-op'ing a delete against a malformed code.
 func startupDelete(ctx context.Context, store *shareapi.Store, codes string, log *slog.Logger) error {
 	for _, code := range strings.Split(codes, ",") {
 		code = strings.TrimSpace(code)
 		if code == "" {
 			continue
+		}
+		if !shareapi.ValidCode(code) {
+			return fmt.Errorf("invalid code %q: must be %d base62 characters", code, shareapi.CodeLength)
 		}
 		n, err := store.DeleteByCode(ctx, code)
 		if err != nil {
