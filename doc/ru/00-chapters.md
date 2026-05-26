@@ -53,6 +53,7 @@
 |---|-------|-------------|
 | 14 | [Сравнение отчётов](14-report-diffing.md) | Before/after, дельты USE, изменения гистограмм |
 | 21 | [Чек-лист для production](21-production-checklist.md) | Все sysctls, скрипт тюнинга, маппинг аномалия→исправление |
+| 22 | [Шеринг отчётов](22-sharing.md) | Одна ссылка через melisai.dev/r/, fragment fallback, self-hosting бэкенда |
 
 ## Справочник
 

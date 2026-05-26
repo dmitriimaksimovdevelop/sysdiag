@@ -46,6 +46,7 @@ $ sudo melisai collect --profile quick -o report.json
 | **Before/After Diff** | Compare two reports. See what improved, what regressed |
 | **Observer Effect Mitigation** | Two-phase collection: baselines first, then BCC tools. PID exclusion |
 | **22 Chapter Documentation** | Book-level guide (EN + RU) covering CPU, memory, disk, network, GPU, NUMA, THP |
+| **Shareable Reports** | `melisai share` → one short URL with the diagnosis, rendered client-side. No agents to install for the reader |
 
 ---
 
@@ -122,6 +123,33 @@ ssh root@server "melisai install"
 ```
 
 No config files. No YAML. No environment variables.
+
+---
+
+## Share a Report
+
+`melisai collect` produces a 30–100 KB JSON file. `melisai share` turns it into one short URL you paste into Slack, an incident channel, or a Jira ticket — the recipient gets the full diagnosis rendered in their browser, no melisai install required.
+
+```bash
+sudo melisai collect --profile quick -o report.json
+melisai share report.json
+# → https://melisai.dev/r/uJOzZUjb
+```
+
+Live demo (real run on a loaded server, health = 2/100): <https://melisai.dev/r/uJOzZUjb>
+
+[![melisai share demo](doc/images/share-demo-hero.png)](https://melisai.dev/r/uJOzZUjb)
+
+Two flavours of URL, picked automatically:
+
+| Mode | URL shape | When it's used |
+|------|-----------|----------------|
+| **Short link** | `https://melisai.dev/r/Xa9bC3kp` | Default. CLI POSTs the gzipped summary to `melisai.dev/api/r`; backend stores it in SQLite and returns the code |
+| **Fragment fallback** | `https://melisai.dev/r#H4sIAAAA...` | Auto-triggered when the upload fails (offline, airgapped, 5xx). The whole report rides in the URL fragment — nothing reaches a server. Force with `--offline` |
+
+The viewer page is static HTML+JS that decodes the payload client-side (`atob` + `DecompressionStream`); the backend is just a key→bytes store with no auth and rate-limited writes. See [doc/en/16-sharing.md](doc/en/16-sharing.md) for the wire format and self-hosting notes.
+
+**Privacy:** the payload carries hostname, kernel version, anomaly evidence and recommendation text. Treat the URL like the JSON report itself.
 
 ---
 

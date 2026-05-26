@@ -53,6 +53,7 @@ Complete table of contents for the melisai documentation. 22 chapters covering L
 |---|---------|-------------------|
 | 14 | [Report Diffing](14-report-diffing.md) | Before/after comparison, USE deltas, histogram changes |
 | 21 | [Production Checklist](21-production-checklist.md) | All sysctls in one place, one-liner tuning script, anomaly→fix mapping |
+| 22 | [Sharing Reports](22-sharing.md) | One-URL share via melisai.dev/r/, fragment fallback, self-hosting the backend |
 
 ## Reference
 
