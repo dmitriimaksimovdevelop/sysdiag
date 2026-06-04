@@ -1,5 +1,10 @@
 # melisai
 
+> [!WARNING]
+> **🧊 Project frozen for an indefinite period.** Development is paused — no new features, fixes, or releases are planned for the foreseeable future. The existing code remains available as-is.
+>
+> **🧊 Проект заморожен на неизвестный срок.** Разработка приостановлена — новые функции, исправления и релизы в обозримом будущем не планируются. Существующий код остаётся доступным как есть.
+
 ![melisai terminal demo](doc/images/melisai_quick_profile.gif)
 
 **Your server is slow. You SSH in. Now what?**
